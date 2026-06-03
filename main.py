@@ -63,6 +63,25 @@ MILD_INSULT_RE = re.compile(
 
 router = Router()
 
+class _DBConnection:
+    """Async context manager that opens a fresh aiosqlite connection each time."""
+    def __init__(self, path: str):
+        self.path = path
+        self._db = None
+
+    async def __aenter__(self) -> aiosqlite.Connection:
+        self._db = await aiosqlite.connect(self.path)
+        self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA journal_mode=WAL;")
+        await self._db.execute("PRAGMA synchronous=NORMAL;")
+        return self._db
+
+    async def __aexit__(self, *args):
+        if self._db:
+            await self._db.close()
+            self._db = None
+
+
 @dataclass
 class ChatSettings:
     personality_mode: str = "عادي"
@@ -95,15 +114,12 @@ class Database:
     def __init__(self, path: str):
         self.path = path
 
-    async def connect(self) -> aiosqlite.Connection:
-        db = await aiosqlite.connect(self.path)
-        db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA journal_mode=WAL;")
-        await db.execute("PRAGMA synchronous=NORMAL;")
-        return db
+    def connect(self):
+        """Returns an async context manager for a fresh DB connection."""
+        return _DBConnection(self.path)
 
     async def init(self) -> None:
-        async with await self.connect() as db:
+        async with self.connect() as db:
             # جدول الجروبات وحالة تفعيلها
             await db.execute(
                 """
@@ -166,7 +182,7 @@ class Database:
             await db.commit()
 
     async def ensure_chat(self, chat_id: int, title: str | None = None, added_by: int = 0) -> None:
-        async with await self.connect() as db:
+        async with self.connect() as db:
             await db.execute(
                 "INSERT OR IGNORE INTO chats(chat_id, title, is_active, last_activity_ts, last_bot_reply_ts, added_by_user_id) VALUES(?,?,0,0,0,?)",
                 (chat_id, title, added_by),
@@ -180,18 +196,18 @@ class Database:
             await db.commit()
 
     async def activate_chat(self, chat_id: int, status: bool = True) -> None:
-        async with await self.connect() as db:
+        async with self.connect() as db:
             await db.execute("UPDATE chats SET is_active=? WHERE chat_id=?", (1 if status else 0, chat_id))
             await db.commit()
 
     async def is_chat_active(self, chat_id: int) -> bool:
-        async with await self.connect() as db:
+        async with self.connect() as db:
             cur = await db.execute("SELECT is_active FROM chats WHERE chat_id=?", (chat_id,))
             row = await cur.fetchone()
             return bool(row["is_active"]) if row else False
 
     async def get_settings(self, chat_id: int) -> ChatSettings:
-        async with await self.connect() as db:
+        async with self.connect() as db:
             cur = await db.execute("SELECT * FROM chat_settings WHERE chat_id=?", (chat_id,))
             row = await cur.fetchone()
             if not row:
@@ -205,7 +221,7 @@ class Database:
     async def update_setting(self, chat_id: int, key: str, value: Any) -> None:
         if key not in DEFAULT_SETTINGS:
             raise KeyError(f"إعداد غير معروف: {key}")
-        async with await self.connect() as db:
+        async with self.connect() as db:
             await db.execute(f"UPDATE chat_settings SET {key}=? WHERE chat_id=?", (value, chat_id))
             await db.commit()
 
@@ -216,7 +232,7 @@ class Database:
         display_name = u.full_name or u.first_name or str(u.id)
         username = f"@{u.username}" if u.username else ""
         now = now_ts()
-        async with await self.connect() as db:
+        async with self.connect() as db:
             cur = await db.execute(
                 "SELECT message_count, relation_score, ai_memory_summary FROM users WHERE chat_id=? AND user_id=?",
                 (chat_id, u.id),
@@ -244,7 +260,7 @@ class Database:
             await db.commit()
 
     async def adjust_relation(self, chat_id: int, user_id: int, delta: int) -> int:
-        async with await self.connect() as db:
+        async with self.connect() as db:
             await db.execute(
                 "UPDATE users SET relation_score = COALESCE(relation_score, 0) + ? WHERE chat_id=? AND user_id=?",
                 (delta, chat_id, user_id),
@@ -255,7 +271,7 @@ class Database:
             return int(row["relation_score"]) if row else 0
 
     async def update_user_memory(self, chat_id: int, user_id: int, summary: str) -> None:
-        async with await self.connect() as db:
+        async with self.connect() as db:
             await db.execute(
                 "UPDATE users SET ai_memory_summary=? WHERE chat_id=? AND user_id=?",
                 (summary, chat_id, user_id),
@@ -263,13 +279,13 @@ class Database:
             await db.commit()
 
     async def get_user_data(self, chat_id: int, user_id: int) -> Optional[dict]:
-        async with await self.connect() as db:
+        async with self.connect() as db:
             cur = await db.execute("SELECT * FROM users WHERE chat_id=? AND user_id=?", (chat_id, user_id))
             row = await cur.fetchone()
             return dict(row) if row else None
 
     async def update_activity(self, chat_id: int, last_activity: bool = True, bot_reply: bool = False) -> None:
-        async with await self.connect() as db:
+        async with self.connect() as db:
             now = now_ts()
             if last_activity:
                 await db.execute("UPDATE chats SET last_activity_ts=? WHERE chat_id=?", (now, chat_id))
@@ -278,13 +294,13 @@ class Database:
             await db.commit()
 
     async def get_warning_count(self, chat_id: int, user_id: int) -> int:
-        async with await self.connect() as db:
+        async with self.connect() as db:
             cur = await db.execute("SELECT count FROM warnings WHERE chat_id=? AND user_id=?", (chat_id, user_id))
             row = await cur.fetchone()
             return int(row["count"]) if row else 0
 
     async def set_warning_count(self, chat_id: int, user_id: int, count: int) -> None:
-        async with await self.connect() as db:
+        async with self.connect() as db:
             await db.execute(
                 """
                 INSERT INTO warnings(chat_id, user_id, count, updated_ts)
@@ -299,13 +315,13 @@ class Database:
         await self.set_warning_count(chat_id, user_id, 0)
 
     async def get_all_chats(self) -> List[dict]:
-        async with await self.connect() as db:
+        async with self.connect() as db:
             cur = await db.execute("SELECT * FROM chats ORDER BY last_activity_ts DESC")
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
 
     async def get_chat_info(self, chat_id: int) -> Optional[dict]:
-        async with await self.connect() as db:
+        async with self.connect() as db:
             cur = await db.execute("SELECT * FROM chats WHERE chat_id=?", (chat_id,))
             row = await cur.fetchone()
             return dict(row) if row else None
