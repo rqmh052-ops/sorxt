@@ -27,7 +27,7 @@ from aiogram.types import (
 # --- إعداد المتغيرات البيئية والتكوين الافتراضي ---
 # ضع توكناتك هنا مباشرة أو اتركها كـ env variables
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8417776212:AAFHeKNm1RhfguSWiG3lKj0CEBLqfqJiwR4").strip()
-XAI_API_KEY = os.getenv("XAI_API_KEY", "xai-wGxuMNdW7jL1NyTDCAcYchYNq68vEofGbj6CpKsdIsiZjrz3nJsGZTL2tGEc6s8bCPVDy2zl9y0lvOck").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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").strip()
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "8287678319").strip())
 DB_PATH = os.getenv("BOT_DB_PATH", "semsim.db")
 
@@ -329,7 +329,7 @@ class Database:
 
 db = Database(DB_PATH)
 
-# --- محاذاة وربط الـ xAI Grok API ---
+# --- محاذاة وربط الـ Groq API ---
 async def call_grok_api(
     system_prompt: str,
     user_prompt: str,
@@ -337,15 +337,15 @@ async def call_grok_api(
     effort: str = "none",
 ) -> str:
     """
-    استدعاء xAI Grok API مع آلية الـ Exponential Backoff التلقائية لإعادة المحاولة (5 مرات كحد أقصى).
+    استدعاء Groq API مع آلية الـ Exponential Backoff التلقائية لإعادة المحاولة (5 مرات كحد أقصى).
     """
-    if not XAI_API_KEY:
-        logging.error("XAI_API_KEY غير معين في متغيرات البيئة.")
+    if not GROQ_API_KEY:
+        logging.error("GROQ_API_KEY غير معين في متغيرات البيئة.")
         return "معلش يا صاحبي، دماغي مسقطة شوية ومش قادر أجمع.. (مشكلة تقنية)."
 
-    url = "https://api.x.ai/v1/chat/completions"
+    url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {XAI_API_KEY}",
+        "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
 
@@ -356,7 +356,7 @@ async def call_grok_api(
     messages.append({"role": "user", "content": user_prompt})
 
     payload = {
-        "model": "grok-3",
+        "model": "llama-3.3-70b-versatile",
         "messages": messages,
     }
 
