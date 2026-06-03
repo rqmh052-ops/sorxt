@@ -27,7 +27,7 @@ from aiogram.types import (
 # --- إعداد المتغيرات البيئية والتكوين الافتراضي ---
 # ضع توكناتك هنا مباشرة أو اتركها كـ env variables
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8417776212:AAFHeKNm1RhfguSWiG3lKj0CEBLqfqJiwR4").strip()
-XAI_API_KEY = os.getenv("XAI_API_KEY", "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").strip()
+XAI_API_KEY = os.getenv("XAI_API_KEY", "xai-wGxuMNdW7jL1NyTDCAcYchYNq68vEofGbj6CpKsdIsiZjrz3nJsGZTL2tGEc6s8bCPVDy2zl9y0lvOck").strip()
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "8287678319").strip())
 DB_PATH = os.getenv("BOT_DB_PATH", "semsim.db")
 
