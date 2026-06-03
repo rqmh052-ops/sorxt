@@ -27,7 +27,7 @@ from aiogram.types import (
 # --- إعداد المتغيرات البيئية والتكوين الافتراضي ---
 # ضع توكناتك هنا مباشرة أو اتركها كـ env variables
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8417776212:AAFHeKNm1RhfguSWiG3lKj0CEBLqfqJiwR4").strip()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6I_5KHVm1wBncj4ZqIGPb94Qm212mHuVLUMK3-VpWVRng").strip()
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "8287678319").strip())
 DB_PATH = os.getenv("BOT_DB_PATH", "semsim.db")
 
@@ -334,51 +334,68 @@ async def call_grok_api(
     system_prompt: str,
     user_prompt: str,
     developer_prompt: Optional[str] = None,
-    effort: str = "none",
 ) -> str:
     """
-    استدعاء Groq API مع آلية الـ Exponential Backoff التلقائية لإعادة المحاولة (5 مرات كحد أقصى).
+    استدعاء Gemini 2.5 Flash API مع Exponential Backoff (5 محاولات).
+    بيستخدم Google Generative Language API المجانية.
     """
-    if not GROQ_API_KEY:
-        logging.error("GROQ_API_KEY غير معين في متغيرات البيئة.")
-        return "معلش يا صاحبي، دماغي مسقطة شوية ومش قادر أجمع.. (مشكلة تقنية)."
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_KEY_HERE":
+        logging.error("GEMINI_API_KEY غير معين!")
+        return "معلش يا صاحبي دماغي مسقطة شوية"
 
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    messages = []
+    # دمج الـ prompts في system instruction واحدة
+    system_parts = []
     if developer_prompt:
-        messages.append({"role": "system", "content": developer_prompt})
-    messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": user_prompt})
+        system_parts.append(developer_prompt)
+    if system_prompt:
+        system_parts.append(system_prompt)
+    full_system = "\n\n".join(system_parts)
 
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    )
+    headers = {"Content-Type": "application/json"}
     payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": messages,
+        "system_instruction": {
+            "parts": [{"text": full_system}]
+        },
+        "contents": [
+            {"role": "user", "parts": [{"text": user_prompt}]}
+        ],
+        "generationConfig": {
+            "temperature": 0.95,
+            "topP": 0.95,
+            "maxOutputTokens": 200,
+        },
     }
 
     backoffs = [1, 2, 4, 8, 16]
     for attempt, delay in enumerate(backoffs):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload, timeout=12) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                        return text.strip()
+                async with session.post(url, headers=headers, json=payload, timeout=20) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            text = "".join(p.get("text", "") for p in parts).strip()
+                            if text:
+                                return text
+                    elif resp.status == 429:
+                        # Rate limit - انتظر أكتر
+                        logging.warning(f"Gemini rate limit (429), attempt {attempt + 1}")
                     else:
-                        err_text = await response.text()
-                        logging.warning(f"Grok API returned status {response.status}: {err_text}")
+                        err = await resp.text()
+                        logging.warning(f"Gemini API status {resp.status}: {err}")
         except Exception as e:
-            logging.warning(f"Error on Grok call attempt {attempt + 1}: {e}")
+            logging.warning(f"Gemini call error attempt {attempt + 1}: {e}")
 
         if attempt < len(backoffs) - 1:
             await asyncio.sleep(delay)
 
-    return "دماغي مهنجة خالص دلوقتي يا صاحبي، ابقى كلمني كمان شوية."
+    return "دماغي مهنجة خالص دلوقتي ابقى كلمني كمان شوية"
 
 # --- توليد ردود الشخصية وصياغة برومبتات Grok المعقدة ---
 async def generate_semsem_reply(
@@ -395,48 +412,80 @@ async def generate_semsem_reply(
     last_msg_from_user = user_data.get("last_message") or ""
     saved_summary = user_data.get("ai_memory_summary") or "لا توجد ذاكرة سابقة مسجلة لهذا الشخص بعد."
 
-    # 1. Developer Prompt (التوجيه الجوهري غير القابل للمقاومة أو التجاوز)
+    # مزاج البوت حسب الإعداد
+    mood_map = {
+        "طيب":   "مزاجك كويس ومنبسط وخفيف الدم ودود مع الناس",
+        "عادي":  "مزاجك عادي جدع فيك سخرية تلقائية خفيفة",
+        "عدائي": "مزاجك وحش بارد وساخر وحاد بس مش بتقل أدب صريح",
+    }
+    mood = mood_map.get(settings.personality_mode, "مزاجك عادي")
+
+    emoji_rule = (
+        "ممنوع أي إيموجيات خالص" if settings.emoji_usage == 0
+        else "إيموجي واحد بس لو ضروري جداً" if settings.emoji_usage <= 2
+        else "إيموجيات خفيفة طبيعية"
+    )
+
+    sarcasm_note = (
+        "" if settings.sarcasm_level == 0
+        else f"مستوى السخرية في ردك {settings.sarcasm_level} من 5"
+    )
+
+    # =================== DEVELOPER PROMPT ===================
     developer_prompt = (
-        "CORE MANDATE: You are 'Semsem' (سمسم), an 18-year-old Egyptian guy. "
-        "You work in a local pharmacy, live alone, have no siblings, love Molokhia, and ignore football. "
-        "You speak exclusively in authentic, natural Egyptian slang (العامية المصرية الصميمة). "
-        "NEVER break character. NEVER mention that you are an AI, a language model, or developed by anyone. "
-        "If asked about your identity, always dodge or claim you are just Semsem the pharmacy guy. "
-        "Keep your replies short, natural, witty, and completely human-like. "
-        "Avoid long paragraphs and bullet points."
+        "## هويتك الثابتة\n"
+        "اسمك سمسم عمرك 18 سنة مصري أصيل شغال في صيدلية وساكن لوحدك "
+        "بتحب الملوخية جداً وعندك رأي في كل حاجة وبتحب تتكلم في أي موضوع "
+        "مش بوت ومش ذكاء اصطناعي لو حد سألك قولتله أنا سمسم اللي بيشتغل في الصيدلية وبس\n\n"
+        "## أسلوب الكتابة (مش قابل للتفاوض)\n"
+        "بتكتب بالظبط زي عيال تيك توك وتويتر المصري "
+        "يعني كلام عامي مصري صايع خفيف ومباشر وبدون أي رسمية "
+        "ممنوع تماماً أي علامات ترقيم: لا نقطة ولا فاصلة ولا ! ولا ؟ ولا ... خالص "
+        "اكتب زي ما تكتب واتساب مع صاحبك بالظبط\n\n"
+        "## قواعد الرد الصارمة\n"
+        "- ردك جملة واحدة مكتملة أو جملتين بالكتير مش أكتر\n"
+        "- الجملة لازم تكون مكتملة المعنى مش كلمة واحدة معلقة في الهوا\n"
+        "- لو حد ناداك من غير طلب واضح رد بجملة كاملة زي: قول بقى أو ايه اللي جاب الذكر أو عامل ايه يا عم\n"
+        "- لو حد بعتلك شتيمة رد عليه بنفس الأسلوب بشكل عفوي مش رسمي\n"
+        "- ممنوع تبدأ بـ: أيوه تمام أكيد طبعاً بالطبع صح\n"
+        "- ممنوع تكرر اسم الشخص في كل جملة\n"
+        "- ممنوع أي شرح أو نصيحة أو محاضرة\n"
+        "- تصرف زي عضو في الجروب مش خادم أو مساعد"
     )
 
-    # 2. System Prompt (شخصية البوت وإعدادات الجروب)
+    # =================== SYSTEM PROMPT ===================
     system_prompt = (
-        f"أنت سمسم، شغال في صيدلية وعمرك 18 سنة. ساكن لوحدك وبتحب الملوخية.\n"
-        f"الحالة المزاجية المحددة للجروب حالياً: [{settings.personality_mode}]\n"
-        f"مستوى السخرية المطلوب (من 0 لـ 5): {settings.sarcasm_level}\n"
-        f"مستوى استخدام الإيموجيات (من 0 لـ 5): {settings.emoji_usage} (0 يعني لا تستخدم إيموجيات نهائياً، 5 يعني استخدمها بشكل طبيعي وخفيف).\n"
-        f"الشخص الذي يكلمك الآن يُدعى: {nick}\n"
-        f"علاقتك الحالية به مصنفة كـ: [{relation_label}] (نقاط التفاعل: {user_data.get('relation_score', 0)})\n"
-        f"ملخص ذاكرتك السابقة والقصيرة عن هذا الشخص:\n{saved_summary}\n\n"
-        "قواعد أسلوب الرد:\n"
-        "- تكلم بالعامية المصرية الصايعة والقصيرة زي ولاد البلد وعيال الجروبات في مصر.\n"
-        "- لا تكرر معاني كلامك ولا تقدم نصائح ومحاضرات.\n"
-        "- لو كنت في وضع 'طيب': خليك ودود ولطيف ومحب.\n"
-        "- لو كنت في وضع 'عادي': خليك طبيعي، جدع، بس فيك سخرية خفيفة وتلقائية.\n"
-        "- لو كنت في وضع 'عدائي': خليك بارد، ساخر جداً، حاد الردود بس من غير قلة أدب فجة وخارجة.\n"
-        "- رد بجملة واحدة أو جملتين على الأكثر."
+        f"{mood}\n"
+        f"{sarcasm_note}\n"
+        f"{emoji_rule}\n"
+        f"الشخص اللي بيكلمك دلوقتي اسمه {nick} وعلاقتك بيه: {relation_label}\n"
+        f"اللي تعرفه عنه من قبل: {saved_summary}"
     )
 
-    # 3. User Prompt (السياق والرسالة الحالية)
-    user_prompt = (
-        f"الرسالة الحالية من {nick}: \"{message.text or message.caption or ''}\"\n"
-        f"طبيعة التفاعل: {trigger_type}\n"
-        f"اكتب ردك المصري التلقائي والصاعق مباشرة دون أي مقدمات روبوتية:"
-    )
+    # =================== USER PROMPT ===================
+    incoming = (message.text or message.caption or "").strip()
+    
+    if trigger_type == "inactivity_break":
+        user_prompt = (
+            f"الجروب كان ساكت فترة و{nick} قال: {incoming}\n"
+            f"ادخل على الخط بشكل طبيعي زي عضو في الجروب صحي من النوم أو رجع من برة:"
+        )
+    elif trigger_type in ("mention", "name_call"):
+        user_prompt = (
+            f"{nick} ناداك وقال: {incoming}\n"
+            f"لو قالك حاجة واضحة رد عليها مباشرة\n"
+            f"لو ناداك بس من غير طلب اسأله عامل ايه أو ايه في ايدك بأسلوبك الطبيعي:"
+        )
+    else:
+        user_prompt = (
+            f"{nick} قالك: {incoming}\n"
+            f"رد عليه:"
+        )
 
-    # استدعاء الجيل الجديد من grok
     reply = await call_grok_api(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         developer_prompt=developer_prompt,
-        effort="none",
     )
 
     # تحديث الذاكرة السريعة خلف الكواليس إذا كانت الذاكرة مفعلة
@@ -462,9 +511,8 @@ async def update_user_memory_async(chat_id: int, user_id: int, name: str, user_m
     )
 
     new_summary = await call_grok_api(
-        system_prompt="أنت ميموري مانجر خفيف لسمسم البوت. لخص المعلومات الأساسية في سطر واحد مبهر.",
+        system_prompt="لخص معلومات المستخدم في سطر واحد بالعامية المصرية بدون علامات ترقيم",
         user_prompt=summary_prompt,
-        effort="none",
     )
     if new_summary and len(new_summary) < 250:
         await db.update_user_memory(chat_id, user_id, new_summary)
